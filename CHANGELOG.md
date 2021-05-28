@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.0 / 2021-09-28
+
+* Solaris: add support for File Event Notifications (fen) [#12](https://github.com/fsnotify/fsnotify/issues/12)
+
 ## v1.5.0 / 2021-08-20
 
 * Go: Increase minimum required version to Go 1.12 [#381](https://github.com/fsnotify/fsnotify/pull/381)
