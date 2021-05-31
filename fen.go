@@ -45,6 +45,7 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+	"golang.org/x/sys/unix"
 )
 
 // Watcher watches a set of files, delivering events to a channel.
@@ -180,7 +181,7 @@ func (w *Watcher) readEvents() {
 			}
 		}
 
-		if pevent.portev_source != C.PORT_SOURCE_FILE {
+		if pevent.portev_source != unix.PORT_SOURCE_FILE {
 			// Event from unexpected source received; should never happen.
 			if !w.sendError(errors.New("Event from unexpected source received")) {
 				return
@@ -226,7 +227,7 @@ func (w *Watcher) handleEvent(obj C.uintptr_t, events C.int, user unsafe.Pointer
 	reRegister := true
 
 	switch {
-	case events&C.FILE_MODIFIED == C.FILE_MODIFIED:
+	case events&unix.FILE_MODIFIED == unix.FILE_MODIFIED:
 		if fmode.IsDir() {
 			if err := w.updateDirectory(path); err != nil {
 				return err
@@ -234,18 +235,18 @@ func (w *Watcher) handleEvent(obj C.uintptr_t, events C.int, user unsafe.Pointer
 		} else {
 			toSend = &Event{path, Write}
 		}
-	case events&C.FILE_ATTRIB == C.FILE_ATTRIB:
+	case events&unix.FILE_ATTRIB == unix.FILE_ATTRIB:
 		toSend = &Event{path, Chmod}
-	case events&C.FILE_DELETE == C.FILE_DELETE:
+	case events&unix.FILE_DELETE == unix.FILE_DELETE:
 		w.unwatch(path)
 		toSend = &Event{path, Remove}
 		reRegister = false
-	case events&C.FILE_RENAME_FROM == C.FILE_RENAME_FROM:
+	case events&unix.FILE_RENAME_FROM == unix.FILE_RENAME_FROM:
 		toSend = &Event{path, Rename}
 		// Don't keep watching the new file name
 		w.unwatch(path)
 		reRegister = false
-	case events&C.FILE_RENAME_TO == C.FILE_RENAME_TO:
+	case events&unix.FILE_RENAME_TO == unix.FILE_RENAME_TO:
 		// We don't report a Rename event for this case, because
 		// Rename events are interpreted as referring to the _old_ name
 		// of the file, and in this case the event would refer to the
@@ -320,9 +321,9 @@ func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
 
 	fmode := C.uintptr_t(stat.Mode())
 
-	mode := C.FILE_MODIFIED | C.FILE_ATTRIB | C.FILE_NOFOLLOW
+	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
 
-	_, err := C.port_associate(w.port, C.PORT_SOURCE_FILE, C.file_obj_to_uintptr(fobj), C.int(mode), C.uintptr_to_ptr(fmode))
+	_, err := C.port_associate(w.port, unix.PORT_SOURCE_FILE, C.file_obj_to_uintptr(fobj), C.int(mode), C.uintptr_to_ptr(fmode))
 	return err
 }
 
