@@ -6,36 +6,6 @@
 
 package fsnotify
 
-/*
-#include <errno.h>
-#include <strings.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <port.h>
-#include <sys/stat.h>
-
-uintptr_t file_obj_to_uintptr (file_obj_t *obj) {
-  return (uintptr_t)obj;
-}
-
-file_obj_t *uintptr_to_file_obj(uintptr_t ptr) {
-  return (file_obj_t *)ptr;
-}
-
-uintptr_t ptr_to_uintptr(void *p) {
-	return (uintptr_t)p;
-}
-
-void *uintptr_to_ptr(uintptr_t i) {
-	return (void *)i;
-}
-
-struct file_info {
-  uint mode;
-};
-*/
-import "C"
 import (
 	"errors"
 	"fmt"
@@ -43,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"unsafe"
 	"golang.org/x/sys/unix"
 )
@@ -53,10 +22,10 @@ type Watcher struct {
 	Events chan Event
 	Errors chan error
 
-	port C.int // solaris port for underlying FEN system
+	port int // solaris port for underlying FEN system
 
 	mu      sync.Mutex
-	watches map[string]*C.file_obj_t
+	watches map[string]*unix.FileObj
 
 	done     chan struct{} // Channel for sending a "quit message" to the reader goroutine
 	doneResp chan struct{} // Channel to respond to Close
@@ -69,11 +38,11 @@ func NewWatcher() (*Watcher, error) {
 	w := new(Watcher)
 	w.Events = make(chan Event)
 	w.Errors = make(chan error)
-	w.port, err = C.port_create()
+	w.port, err = unix.PortCreate()
 	if err != nil {
 		return nil, err
 	}
-	w.watches = make(map[string]*C.file_obj_t)
+	w.watches = make(map[string]*unix.FileObj)
 	w.done = make(chan struct{})
 	w.doneResp = make(chan struct{})
 
@@ -118,7 +87,7 @@ func (w *Watcher) Close() error {
 		return nil
 	}
 	close(w.done)
-	C.close(w.port)
+	unix.Close(w.port)
 	<-w.doneResp
 	return nil
 }
@@ -168,8 +137,8 @@ func (w *Watcher) readEvents() {
 	defer close(w.Events)
 
 	for {
-		var pevent C.port_event_t
-		_, err := C.port_get(w.port, &pevent, nil)
+		var pevent unix.PortEvent
+		_, err := unix.PortGet(w.port, &pevent, nil)
 		if err != nil {
 			// port_get failed because we called w.Close()
 			if w.isClosed() {
@@ -181,7 +150,7 @@ func (w *Watcher) readEvents() {
 			}
 		}
 
-		if pevent.portev_source != unix.PORT_SOURCE_FILE {
+		if pevent.Source != unix.PORT_SOURCE_FILE {
 			// Event from unexpected source received; should never happen.
 			if !w.sendError(errors.New("Event from unexpected source received")) {
 				return
@@ -189,7 +158,7 @@ func (w *Watcher) readEvents() {
 			continue
 		}
 
-		err = w.handleEvent(pevent.portev_object, pevent.portev_events, pevent.portev_user)
+		err = w.handleEvent(pevent.Object, pevent.Events, pevent.User)
 		if err != nil {
 			if !w.sendError(err) {
 				return
@@ -218,10 +187,10 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, handler func(st
 	return handler(path, stat)
 }
 
-func (w *Watcher) handleEvent(obj C.uintptr_t, events C.int, user unsafe.Pointer) error {
-	fobj := C.uintptr_to_file_obj(obj)
-	fmode := os.FileMode(C.ptr_to_uintptr(user))
-	path := C.GoString(fobj.fo_name)
+func (w *Watcher) handleEvent(obj uint64, events int32, user *byte) error {
+	fobj := (*unix.FileObj)(unsafe.Pointer(&obj))
+	fmode := (*os.FileMode)(unsafe.Pointer(user))
+	path := fobj.GetName()
 
 	var toSend *Event
 	reRegister := true
@@ -312,18 +281,17 @@ func (w *Watcher) updateDirectory(path string) error {
 }
 
 func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
-	// We malloc the file_obj_t here to make sure it stays accessible when handling events
-	fobj := (*C.file_obj_t)(C.malloc(C.sizeof_file_obj_t))
-	// NOTE: C.CString allocates memory on the C heap, which must be freed later with C.free
-	name := C.CString(path)
-	populateFileObj(fobj, name, stat)
+	fobj, err := unix.CreateFileObj(path, stat)
+	if err != nil {
+		return fmt.Errorf("Failed to create unix.FileObj: %v", err)
+	}
 	w.watch(path, fobj)
 
-	fmode := C.uintptr_t(stat.Mode())
+	fmode := stat.Mode()
 
 	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
 
-	_, err := C.port_associate(w.port, unix.PORT_SOURCE_FILE, C.file_obj_to_uintptr(fobj), C.int(mode), C.uintptr_to_ptr(fmode))
+	_, err = unix.PortAssociateFileObj(w.port, fobj, mode, unsafe.Pointer(&fmode))
 	return err
 }
 
@@ -333,22 +301,8 @@ func (w *Watcher) dissociateFile(path string, stat os.FileInfo) error {
 	}
 	fobj := w.unwatch(path)
 
-	_, err := C.port_dissociate(w.port, C.PORT_SOURCE_FILE, C.file_obj_to_uintptr(fobj))
-	C.free(unsafe.Pointer(fobj.fo_name))
-	C.free(unsafe.Pointer(fobj))
+	_, err := unix.PortDissociateFileObj(w.port, fobj)
 	return err
-}
-
-func populateFileObj(fobj *C.file_obj_t, name *C.char, stat os.FileInfo) {
-	fobj.fo_name = name
-	fobj.fo_atime.tv_sec = C.time_t(stat.Sys().(*syscall.Stat_t).Atim.Sec)
-	fobj.fo_atime.tv_nsec = C.long(stat.Sys().(*syscall.Stat_t).Atim.Nsec)
-
-	fobj.fo_mtime.tv_sec = C.time_t(stat.Sys().(*syscall.Stat_t).Mtim.Sec)
-	fobj.fo_mtime.tv_nsec = C.long(stat.Sys().(*syscall.Stat_t).Mtim.Nsec)
-
-	fobj.fo_ctime.tv_sec = C.time_t(stat.Sys().(*syscall.Stat_t).Ctim.Sec)
-	fobj.fo_ctime.tv_nsec = C.long(stat.Sys().(*syscall.Stat_t).Ctim.Nsec)
 }
 
 func (w *Watcher) watched(path string) bool {
@@ -358,7 +312,7 @@ func (w *Watcher) watched(path string) bool {
 	return found
 }
 
-func (w *Watcher) unwatch(path string) *C.file_obj_t {
+func (w *Watcher) unwatch(path string) *unix.FileObj {
 	w.mu.Lock()
 	fobj := w.watches[path]
 	delete(w.watches, path)
@@ -366,7 +320,7 @@ func (w *Watcher) unwatch(path string) *C.file_obj_t {
 	return fobj
 }
 
-func (w *Watcher) watch(path string, fobj *C.file_obj_t) {
+func (w *Watcher) watch(path string, fobj *unix.FileObj) {
 	w.mu.Lock()
 	w.watches[path] = fobj
 	w.mu.Unlock()
