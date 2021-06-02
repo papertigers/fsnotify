@@ -188,8 +188,11 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, handler func(st
 }
 
 func (w *Watcher) handleEvent(event *unix.PortEvent) error {
-	fobj := (*unix.FileObj)(unsafe.Pointer(uintptr(event.Object)))
-	user := (*os.FileMode)(unsafe.Pointer(event.User))
+	fobj, err := event.GetFileObj()
+	if err != nil  {
+		return err
+	}
+	user := (*os.FileInfo)(event.GetUser())
 	events := event.Events
 	path := fobj.GetName()
 
@@ -288,10 +291,9 @@ func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
 	}
 	w.watch(path, fobj)
 
-	fmode := stat.Mode()
-	var user *os.FileMode
-	if fmode.IsDir() {
-		user = &fmode
+	var user *os.FileInfo
+	if stat.IsDir() {
+		user = &stat
 	}
 
 	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
