@@ -158,7 +158,7 @@ func (w *Watcher) readEvents() {
 			continue
 		}
 
-		err = w.handleEvent(pevent.Object, pevent.Events, pevent.User)
+		err = w.handleEvent(&pevent)
 		if err != nil {
 			if !w.sendError(err) {
 				return
@@ -187,9 +187,10 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, handler func(st
 	return handler(path, stat)
 }
 
-func (w *Watcher) handleEvent(obj uint64, events int32, user *byte) error {
-	fobj := (*unix.FileObj)(unsafe.Pointer(&obj))
-	fmode := (*os.FileMode)(unsafe.Pointer(user))
+func (w *Watcher) handleEvent(event *unix.PortEvent) error {
+	fobj := (*unix.FileObj)(unsafe.Pointer(uintptr(event.Object)))
+	fmode := (*os.FileMode)(unsafe.Pointer(event.User))
+	events := event.Events
 	path := fobj.GetName()
 
 	var toSend *Event
