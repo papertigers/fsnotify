@@ -9,12 +9,12 @@ package fsnotify
 import (
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
 	"unsafe"
-	"golang.org/x/sys/unix"
 )
 
 // Watcher watches a set of files, delivering events to a channel.
@@ -189,7 +189,7 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, handler func(st
 
 func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 	fobj := (*unix.FileObj)(unsafe.Pointer(uintptr(event.Object)))
-	fmode := (*os.FileMode)(unsafe.Pointer(event.User))
+	user := (*os.FileMode)(unsafe.Pointer(event.User))
 	events := event.Events
 	path := fobj.GetName()
 
@@ -198,7 +198,7 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 
 	switch {
 	case events&unix.FILE_MODIFIED == unix.FILE_MODIFIED:
-		if fmode.IsDir() {
+		if user != nil {
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
@@ -289,10 +289,14 @@ func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
 	w.watch(path, fobj)
 
 	fmode := stat.Mode()
+	var user *os.FileMode
+	if fmode.IsDir() {
+		user = &fmode
+	}
 
 	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
 
-	_, err = unix.PortAssociateFileObj(w.port, fobj, mode, unsafe.Pointer(&fmode))
+	_, err = unix.PortAssociateFileObj(w.port, fobj, mode, unsafe.Pointer(user))
 	return err
 }
 
