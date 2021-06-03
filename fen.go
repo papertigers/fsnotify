@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"unsafe"
 )
 
 // Watcher watches a set of files, delivering events to a channel.
@@ -192,16 +191,17 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 	if err != nil  {
 		return err
 	}
-	user := (*os.FileInfo)(event.GetUser())
 	events := event.Events
 	path := fobj.GetName()
+	// if this path was a directory, we placed a non-nil pointer as the user cookie
+	isDir := event.GetUser() != nil
 
 	var toSend *Event
 	reRegister := true
 
 	switch {
 	case events&unix.FILE_MODIFIED == unix.FILE_MODIFIED:
-		if user != nil {
+		if isDir {
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
@@ -291,14 +291,21 @@ func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
 	}
 	w.watch(path, fobj)
 
-	var user *os.FileInfo
-	if stat.IsDir() {
-		user = &stat
-	}
-
 	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
 
-	_, err = unix.PortAssociateFileObj(w.port, fobj, mode, unsafe.Pointer(user))
+	// a previous implementation passed through an entire os.FileMode
+	// using cgo and got it back out again. Without cgo, that struct can
+	// get garbage collected. All we really need to know is whether
+	// or not this was a directory
+	var user *byte
+	if stat.IsDir() {
+		// the point here is to make this pointer non-nil
+		// as a sign that this path is a directory
+		var something byte = 0x1
+		user = &something
+	}
+
+	_, err = unix.PortAssociateFileObj(w.port, fobj, mode, user)
 	return err
 }
 
