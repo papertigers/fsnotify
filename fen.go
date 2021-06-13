@@ -13,7 +13,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
 // Watcher watches a set of files, delivering events to a channel.
@@ -21,10 +20,7 @@ type Watcher struct {
 	Events chan Event
 	Errors chan error
 
-	port int // solaris port for underlying FEN system
-
-	mu      sync.Mutex
-	watches map[string]*unix.FileObj
+	port *unix.EventPort
 
 	done     chan struct{} // Channel for sending a "quit message" to the reader goroutine
 	doneResp chan struct{} // Channel to respond to Close
@@ -37,11 +33,10 @@ func NewWatcher() (*Watcher, error) {
 	w := new(Watcher)
 	w.Events = make(chan Event)
 	w.Errors = make(chan error)
-	w.port, err = unix.PortCreate()
+	w.port, err = unix.NewEventPort()
 	if err != nil {
 		return nil, err
 	}
-	w.watches = make(map[string]*unix.FileObj)
 	w.done = make(chan struct{})
 	w.doneResp = make(chan struct{})
 
@@ -86,7 +81,7 @@ func (w *Watcher) Close() error {
 		return nil
 	}
 	close(w.done)
-	unix.Close(w.port)
+	w.port.Close()
 	<-w.doneResp
 	return nil
 }
@@ -95,6 +90,9 @@ func (w *Watcher) Close() error {
 func (w *Watcher) Add(name string) error {
 	if w.isClosed() {
 		return errors.New("FEN watcher already closed")
+	}
+	if w.port.PathIsWatched(name) {
+		return nil
 	}
 	stat, err := os.Stat(name)
 	switch {
@@ -112,10 +110,9 @@ func (w *Watcher) Remove(name string) error {
 	if w.isClosed() {
 		return errors.New("FEN watcher already closed")
 	}
-	if !w.watched(name) {
+	if !w.port.PathIsWatched(name) {
 		return fmt.Errorf("can't remove non-existent FEN watch for: %s", name)
 	}
-
 	stat, err := os.Stat(name)
 	switch {
 	case err != nil:
@@ -123,7 +120,7 @@ func (w *Watcher) Remove(name string) error {
 	case stat.IsDir():
 		return w.handleDirectory(name, stat, w.dissociateFile)
 	default:
-		return w.dissociateFile(name, stat)
+		return w.port.DissociatePath(name)
 	}
 }
 
@@ -136,8 +133,7 @@ func (w *Watcher) readEvents() {
 	defer close(w.Events)
 
 	for {
-		var pevent unix.PortEvent
-		_, err := unix.PortGet(w.port, &pevent, nil)
+		pevent, err := w.port.Get(nil)
 		if err != nil {
 			// port_get failed because we called w.Close()
 			if w.isClosed() {
@@ -157,7 +153,7 @@ func (w *Watcher) readEvents() {
 			continue
 		}
 
-		err = w.handleEvent(&pevent)
+		err = w.handleEvent(pevent)
 		if err != nil {
 			if !w.sendError(err) {
 				return
@@ -187,21 +183,16 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, handler func(st
 }
 
 func (w *Watcher) handleEvent(event *unix.PortEvent) error {
-	fobj, err := event.GetFileObj()
-	if err != nil  {
-		return err
-	}
 	events := event.Events
-	path := fobj.GetName()
-	// if this path was a directory, we placed a non-nil pointer as the user cookie
-	isDir := event.GetUser() != nil
+	path := event.Path
+	fmode := (*event.Cookie).(os.FileMode)
 
 	var toSend *Event
 	reRegister := true
 
 	switch {
 	case events&unix.FILE_MODIFIED == unix.FILE_MODIFIED:
-		if isDir {
+		if fmode.IsDir() {
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
@@ -211,13 +202,11 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 	case events&unix.FILE_ATTRIB == unix.FILE_ATTRIB:
 		toSend = &Event{path, Chmod}
 	case events&unix.FILE_DELETE == unix.FILE_DELETE:
-		w.unwatch(path)
 		toSend = &Event{path, Remove}
 		reRegister = false
 	case events&unix.FILE_RENAME_FROM == unix.FILE_RENAME_FROM:
 		toSend = &Event{path, Rename}
 		// Don't keep watching the new file name
-		w.unwatch(path)
 		reRegister = false
 	case events&unix.FILE_RENAME_TO == unix.FILE_RENAME_TO:
 		// We don't report a Rename event for this case, because
@@ -228,11 +217,8 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 
 		// inotify reports a Remove event in this case, so we simulate
 		// this here.
-		if w.watched(path) {
-			toSend = &Event{path, Remove}
-		}
+		toSend = &Event{path, Remove}
 		// Don't keep watching the file that was removed
-		w.unwatch(path)
 		reRegister = false
 	default:
 		return errors.New("unknown event received")
@@ -267,7 +253,7 @@ func (w *Watcher) updateDirectory(path string) error {
 
 	for _, finfo := range files {
 		path := filepath.Join(path, finfo.Name())
-		if w.watched(path) {
+		if w.port.PathIsWatched(path) {
 			continue
 		}
 
@@ -285,57 +271,14 @@ func (w *Watcher) updateDirectory(path string) error {
 }
 
 func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
-	fobj, err := unix.CreateFileObj(path, stat)
-	if err != nil {
-		return fmt.Errorf("Failed to create unix.FileObj: %v", err)
-	}
-	w.watch(path, fobj)
-
 	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
-
-	// a previous implementation passed through an entire os.FileMode
-	// using cgo and got it back out again. Without cgo, that struct can
-	// get garbage collected. All we really need to know is whether
-	// or not this was a directory
-	var user *byte
-	if stat.IsDir() {
-		// the point here is to make this pointer non-nil
-		// as a sign that this path is a directory
-		var something byte = 0x1
-		user = &something
-	}
-
-	_, err = unix.PortAssociateFileObj(w.port, fobj, mode, user)
-	return err
+	var fmode unix.EventPortUserCookie = stat.Mode()
+	return w.port.AssociatePath(path, stat, mode, &fmode)
 }
 
 func (w *Watcher) dissociateFile(path string, stat os.FileInfo) error {
-	if !w.watched(path) {
+	if !w.port.PathIsWatched(path) {
 		return nil
 	}
-	fobj := w.unwatch(path)
-
-	_, err := unix.PortDissociateFileObj(w.port, fobj)
-	return err
-}
-
-func (w *Watcher) watched(path string) bool {
-	w.mu.Lock()
-	_, found := w.watches[path]
-	w.mu.Unlock()
-	return found
-}
-
-func (w *Watcher) unwatch(path string) *unix.FileObj {
-	w.mu.Lock()
-	fobj := w.watches[path]
-	delete(w.watches, path)
-	w.mu.Unlock()
-	return fobj
-}
-
-func (w *Watcher) watch(path string, fobj *unix.FileObj) {
-	w.mu.Lock()
-	w.watches[path] = fobj
-	w.mu.Unlock()
+	return w.port.DissociatePath(path)
 }
