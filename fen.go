@@ -135,6 +135,10 @@ func (w *Watcher) readEvents() {
 	for {
 		pevent, err := w.port.Get(nil)
 		if err != nil {
+			// Interrupted system call (pevent is nil) ignore and continue
+			if err == unix.EINTR {
+				continue
+			}
 			// port_get failed because we called w.Close()
 			if w.isClosed() {
 				return
