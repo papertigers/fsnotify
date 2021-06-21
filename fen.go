@@ -189,7 +189,7 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, handler func(st
 func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 	events := event.Events
 	path := event.Path
-	fmode := (*event.Cookie).(os.FileMode)
+	fmode := event.Cookie.(os.FileMode)
 
 	var toSend *Event
 	reRegister := true
@@ -276,8 +276,8 @@ func (w *Watcher) updateDirectory(path string) error {
 
 func (w *Watcher) associateFile(path string, stat os.FileInfo) error {
 	mode := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
-	var fmode unix.EventPortUserCookie = stat.Mode()
-	return w.port.AssociatePath(path, stat, mode, &fmode)
+	fmode := stat.Mode()
+	return w.port.AssociatePath(path, stat, mode, fmode)
 }
 
 func (w *Watcher) dissociateFile(path string, stat os.FileInfo) error {
