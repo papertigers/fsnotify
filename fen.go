@@ -132,15 +132,16 @@ func (w *Watcher) readEvents() {
 	defer close(w.Errors)
 	defer close(w.Events)
 
+	pevents := make([]unix.PortEvent, 8, 8)
 	for {
-		pevent, err := w.port.Get(nil)
+		count, err := w.port.Get(pevents, 1, nil)
 		if err != nil {
-			// Interrupted system call (pevent is nil) ignore and continue
-			if err == unix.EINTR {
+			// Interrupted system call (count should be 0) ignore and continue
+			if err == unix.EINTR && count == 0 {
 				continue
 			}
-			// port_get failed because we called w.Close()
-			if w.isClosed() {
+			// Get failed because we called w.Close()
+			if err == unix.EBADF && w.isClosed() {
 				return
 			}
 			// There was an error not caused by calling w.Close()
@@ -149,18 +150,21 @@ func (w *Watcher) readEvents() {
 			}
 		}
 
-		if pevent.Source != unix.PORT_SOURCE_FILE {
-			// Event from unexpected source received; should never happen.
-			if !w.sendError(errors.New("Event from unexpected source received")) {
-				return
+		p := pevents[:count]
+		for _, pevent := range(p) {
+			if pevent.Source != unix.PORT_SOURCE_FILE {
+				// Event from unexpected source received; should never happen.
+				if !w.sendError(errors.New("Event from unexpected source received")) {
+					return
+				}
+				continue
 			}
-			continue
-		}
 
-		err = w.handleEvent(pevent)
-		if err != nil {
-			if !w.sendError(err) {
-				return
+			err = w.handleEvent(&pevent)
+			if err != nil {
+				if !w.sendError(err) {
+					return
+				}
 			}
 		}
 	}
