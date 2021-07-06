@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.5.0 / 2018-08-28
+## v1.5.0 / 2021-08-28
 
 * Solaris: add support for File Event Notifications (fen) [#12](https://github.com/fsnotify/fsnotify/issues/12)
 
