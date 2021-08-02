@@ -61,3 +61,20 @@ jobs:
           # this is here as a workaround for https://github.com/golangci/golangci-lint-action/issues/244
           skip-pkg-cache: true
 
+  test-illumos:
+    runs-on: macos-latest
+    name: Test in illumos VM
+    steps:
+    - uses: actions/checkout@v2
+    - name: Test on illumos
+      id: test
+      uses: papertigers/illumos-vm@main
+      with:
+        prepare: |
+          pkg set-publisher -r -O https://pkg.omnios.org/r151036/extra extra.omnios
+          pkg install go-116
+        run: |
+          /opt/ooce/go-1.16/bin/go test || true
+    - name: Sleep
+      run: sleep 5
+    - uses: neilpang/debugger-action@master
