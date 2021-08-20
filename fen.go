@@ -95,7 +95,7 @@ func (w *Watcher) AddRaw(name string) error {
 	if w.port.PathIsWatched(name) {
 		return nil
 	}
-	stat, err := os.Stat(name)
+	stat, err := os.Lstat(name)
 	switch {
 	case err != nil:
 		return err
@@ -114,7 +114,7 @@ func (w *Watcher) Remove(name string) error {
 	if !w.port.PathIsWatched(name) {
 		return fmt.Errorf("can't remove non-existent FEN watch for: %s", name)
 	}
-	stat, err := os.Stat(name)
+	stat, err := os.Lstat(name)
 	switch {
 	case err != nil:
 		return err
@@ -244,7 +244,7 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 
 	// If we get here, it means we've hit an event above that requires us to
 	// continue watching the file or directory
-	stat, err := os.Stat(path)
+	stat, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
