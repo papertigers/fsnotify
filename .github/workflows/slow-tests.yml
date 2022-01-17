@@ -2,7 +2,7 @@ name: slow-tests
 on: [workflow_dispatch]
 jobs:
   test-illumos:
-    runs-on: macos-latest
+    runs-on: macos-10.15
     name: Test in illumos VM
     steps:
     - uses: actions/checkout@v2
